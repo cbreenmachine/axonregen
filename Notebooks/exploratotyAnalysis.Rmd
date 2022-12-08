@@ -1,0 +1,132 @@
+---
+title: "Exploratory Data Analysis: Axon Regeneration"
+
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, show=F, echo=F, warning=F, message=F}
+library(tidyverse)
+```
+
+
+```{r}
+df <- read_table("../Data/untreated.sni.untreated.ddi.txt", 
+                 show_col_types = F)
+```
+
+# Couple notes
+
+Kruskal-Walis is the right idea, but it's non-parametric. Generally, if parametric assumptions seems reasonably, that's preferred because it makes computing confidence intervals and p-values easier. There's exceptions, but you'll also get more power 
+
+
+# Quick and Dirty Look at Replication etc.
+
+- Two "treatments": time (hours) and `Group`
+- Measurements were *not* repeated --> independence between time points
+
+```{r}
+df %>% 
+  group_by(Group, Hour) %>%
+  summarise(count = n())
+```
+Vast majority of treatment levels have three replicates, a couple have four or five. 
+
+# EDA Plot: What do the measurements look like over time?
+
+```{r}
+df %>%
+  ggplot(aes(x = Hour, y = AxonLength, color = Group)) +
+  geom_point() +
+  theme_minimal() +
+  ggtitle("Axon length over time")
+```
+Slopes are well separated. The `SNI` sample in the top right gives me pause--it may be high leverage and disproportionately drive the slope estimate. Slopes are reasonably linear. Looks like we can force the intercept to zero. There's some funneling of variance--data get a bit more variable as time passes, but nothing so extreme as to justify a transformation in my opinion. Most of that increase in variance is just from that outlier. In other words, no need to log or square root `AxonLength`.
+
+# Model 1: No Intercept
+
+Let $Y_{i}$ be the random variable representing axon length for subject $i$. Let $X_{i,1}$ be the time (in hours) that the measurement was taken, and let $X_{i ,2}$ be the indicator random variable for group (i.e. $X_{1,2}=1$ if subject 1 is `DDI`). As usual, let $\sigma^2$ be an unknown but fixed variance parameter to a centered Gaussian. The error term is iid $\epsilon_i \sim \mathcal{N}(0, \sigma^2)$.
+
+We do not include an intercept because axon length at time zero is reasonably assumed to be zero (or close enough).
+
+Let $\beta_1, \beta_2, \beta_3$ be the associated regression coefficients for time (`Hours`), group (`isDDI`), and an interaction term. Our model is then 
+
+$Y_{i} \sim \beta_1X_{i,1} + \beta_2X_{i,2} + \beta_3X_{i,3} + \epsilon_i$
+
+The model is fit below, with light pre-processing.
+
+```{r}
+data <- df %>%
+  dplyr::mutate(isDDI = ifelse(Group == "DDI", 1, 0))
+
+model <- lm("AxonLength ~ Hour + isDDI + Hour:isDDI - 1", data = data)
+anova(model)
+```
+Before accounting for multiple testing, etc. we are asking the following questions, with some abuse of language to speed things up.
+
+1. Is there an association between `Hour` and `AxonLength` after adjusting for group and interaction? Yes
+2. Is there a difference in adjusted means between `DDI` and `SNI` (not quite the same as a t-test result but pretty close)? Yes.
+3. Finally, is there a time by group interaction? Yes.
+
+Number 3 is the real question of interest. You can already tell--and I'm sure you've already modeled this--that the interaction between `Hour` and `Group` is significant. We really should do this marginally--what do we get 
+
+## Model diagnostics
+Residuals grossly non-normal? No.
+
+```{r}
+hist(model$residuals, breaks = 40,
+     main = "Residuals are Gaussian enough",
+     xlab = "Residual",
+     xlim = c(-300, 300))
+```
+
+How do the predictions look? Pretty damn good.
+
+```{r}
+y <- data$AxonLength
+y.hat <- predict(model, data)
+
+data.frame(y=y, y=y.hat) %>%
+  ggplot(aes(x = y, y = y.hat)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal() +
+  xlab("y (ground truth)") +
+  ylab("y.hat (predicted)") +
+  labs(caption = "Red line indicates perfect prediction") +
+  ggtitle("Predictions from model are reasonable")
+
+```
+
+# Question of Interest: At what timepoint is there a significant difference between groups?
+
+This is really getting at "what's the earliest time point that has a difference...
+
+If you wanted to be really precise and ask all sorts of interesting questions of the data, you could fit a Bayesian model. This gets you posterior distributions that you can play with. For example, at time (plug in some number between 0 and 50 hours), what's the probability that the axon length for `DDI` and `SNI` is more than 50 microns different? This is why I was curious about practical significance.
+
+*I'd be happy to set this up, but it will take more time and I would not be able to get to it until after the semester wraps up.*
+
+In frequentist spaces like traditional linear regression / ANOVA above, we can't quite ask those questions because we're dealing with coverage probabilities (some bullshit). We've established the linear model fits well above.
+
+
+```{r}
+all_hours <- sort(unique(data$Hour))
+
+# Pack p-values into data frame
+tests <- data.frame(Hr = all_hours,
+                    p = rep(NA, length(all_hours)))
+
+for (ii in 1:nrow(tests)){
+  hh <- tests[ii, "Hr"]
+  
+  aa <- data %>% dplyr::filter(Hour == hh, Group == "DDI") %>% pull(AxonLength)
+  bb <- data %>% dplyr::filter(Hour == hh, Group == "SNI") %>% pull(AxonLength)
+  tests[ii, "p"] <- t.test(aa, bb)$p.val
+}
+
+tests
+```
+Hour 13 is why the formulation is problematic. How do you handle a significant difference (hour 10), followed by an insignificant one?
+
+I'll think about it some more, this is all I had time for at the moment. I think Bayes is the way to go... But I'm sure someone has come across this before. Especially in clinical trial literature. How do you decide when curves/functions are "far enough" away from each other.
